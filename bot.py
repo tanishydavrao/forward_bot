@@ -253,37 +253,64 @@ def format_results(items):
 
 
 
-def build_keyboard(query, page, total_pages, content_type="", tag="s"):
+def build_keyboard(query, page, total_pages, content_type="", tag="s", user_id=None):
     b64 = encode_query(query)
     buttons = []
 
     nav = []
     if page > 1:
-        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{tag}|{b64}|{page-1}|{content_type}"))
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{tag}|{b64}|{page-1}|{content_type}|{user_id}"))
     if page < total_pages:
-        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"{tag}|{b64}|{page+1}|{content_type}"))
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"{tag}|{b64}|{page+1}|{content_type}|{user_id}"))
     if nav:
         buttons.append(nav)
 
-    # Only show filter buttons if query is not exactly "movies" or "series"
     if query.lower() not in ("movies", "series"):
         active = " ✅"
         buttons.append([
-            InlineKeyboardButton("🎞 Movies" + (active if content_type == "movie" else ""), callback_data=f"{tag}|{b64}|1|movie"),
-            InlineKeyboardButton("📺 Series" + (active if content_type == "series" else ""), callback_data=f"{tag}|{b64}|1|series"),
-            InlineKeyboardButton("🌀 All" + (active if content_type == "" else ""), callback_data=f"{tag}|{b64}|1|")
+            InlineKeyboardButton("🎞 Movies" + (active if content_type == "movie" else ""), callback_data=f"{tag}|{b64}|1|movie|{user_id}"),
+            InlineKeyboardButton("📺 Series" + (active if content_type == "series" else ""), callback_data=f"{tag}|{b64}|1|series|{user_id}"),
+            InlineKeyboardButton("🌀 All" + (active if content_type == "" else ""), callback_data=f"{tag}|{b64}|1||{user_id}")
+        ])
+
+    # Close button
+    if user_id:
+        buttons.append([
+            InlineKeyboardButton("❌ Close", callback_data=f"close|{user_id}")
         ])
 
     return InlineKeyboardMarkup(buttons)
+
+
+@bot.on_callback_query(filters.regex(r"^close\|"))
+async def close_callback_handler(client: Client, cq: CallbackQuery):
+    parts = cq.data.split("|")
+    if len(parts) != 2:
+        return await cq.answer("❌ Invalid callback data.", show_alert=True)
+
+    orig_user_id = parts[1]
+    if str(cq.from_user.id) != str(orig_user_id):
+        return await cq.answer("🤖 Access denied! This button was made with someone else’s sweat and tears. Respect it 😆", show_alert=True)
+
+    try:
+        await cq.message.delete()
+    except Exception:
+        await cq.message.edit("❌ Closed", reply_markup=None)
+
+
 @bot.on_callback_query(filters.regex(r"^e\|"))
 async def letters_callback_handler(client: Client, cq: CallbackQuery):
-    await cq.answer()
-
     parts = cq.data.split("|")
-    if len(parts) != 4:
-        return await cq.message.edit("❌ Invalid callback data.")
+    if len(parts) != 5:  # e|b64_q|page|content_type|user_id
+        return await cq.answer("❌ Invalid callback data.", show_alert=True)
 
-    _, b64_q, page_str, content_type = parts
+    _, b64_q, page_str, content_type, orig_user_id = parts
+
+    if str(cq.from_user.id) != str(orig_user_id):
+        return await cq.answer("🤚 Not your button, chief. Start your own search like a legend 🚀", show_alert=True)
+
+    # ⚠️ DO NOT call await cq.answer() again below this point
+
     letter = decode_query(b64_q)
     if not letter:
         return await cq.message.edit("❌ Failed to decode letter.")
@@ -311,19 +338,23 @@ async def letters_callback_handler(client: Client, cq: CallbackQuery):
 
     total = data.get("total_pages", 1)
     text = format_results(items)
-    kb = build_keyboard(letter, page, total, content_type, tag="e")
+    kb = build_keyboard(letter, page, total, content_type, tag="e", user_id=orig_user_id)
 
     await cq.message.edit(text, reply_markup=kb)
 
+
 @bot.on_callback_query(filters.regex(r"^ep\|"))
 async def endpoint_callback_handler(client: Client, cq: CallbackQuery):
-    await cq.answer()
-
     parts = cq.data.split("|")
-    if len(parts) != 4:
-        return await cq.message.edit("❌ Invalid callback data.")
+    if len(parts) != 5:  # ep|b64_q|page|content_type|user_id
+        return await cq.answer("❌ Invalid callback data.", show_alert=True)
 
-    _, b64_q, page_str, content_type = parts
+    _, b64_q, page_str, content_type, orig_user_id = parts
+
+    if str(cq.from_user.id) != str(orig_user_id):
+        return await cq.answer("🚫 Button stealing detected. Initiating FBI trace... just kidding. Do your own search!", show_alert=True)
+
+    # 👇 From here onward, do NOT use cq.answer again
     cmd = decode_query(b64_q)
     if not cmd or cmd not in API_ENDPOINTS:
         return await cq.message.edit("❌ Invalid command in callback.")
@@ -351,47 +382,23 @@ async def endpoint_callback_handler(client: Client, cq: CallbackQuery):
 
     total = data.get("total_pages", 1)
     text = format_endpoint_results(items)
-    kb = build_keyboard(cmd, page, total, content_type, tag="ep")
+    kb = build_keyboard(cmd, page, total, content_type, tag="ep", user_id=orig_user_id)
 
     await cq.message.edit(text, reply_markup=kb)
 
-# --- /s command handler ---
-@bot.on_message((filters.private | filters.group) & filters.command("s"))
-async def search_handler(client: Client, message: Message):
-    if len(message.command) < 2:
-        return await message.reply("❌ Please provide a search query.\n\nUsage: <code>/s naruto</code>")
 
-    query = " ".join(message.command[1:])
-    sent = await message.reply("🔍 Searching…")
-
-    try:
-        async with httpx.AsyncClient() as http_client:
-            resp = await http_client.get(f"{SEARCH_API_BASE}/search/", params={"q": query, "page": 1})
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as e:
-        return await sent.edit(f"❌ API error: {e}")
-
-    items = data.get("items", [])
-    if not items:
-        return await sent.edit("⚠️ No results found.")
-
-    total = data.get("total_pages", 1)
-    text = format_results(items)
-    kb = build_keyboard(query, 1, total)
-
-    await sent.edit(text, reply_markup=kb)
-
-# --- Callback query handler ---
 @bot.on_callback_query(filters.regex(r"^s\|"))
 async def callback_handler(client: Client, cq: CallbackQuery):
-    await cq.answer()
-
     parts = cq.data.split("|")
-    if len(parts) != 4:
-        return await cq.message.edit("❌ Invalid callback data.")
+    if len(parts) != 5:  # s|b64_q|page|content_type|user_id
+        return await cq.answer("❌ Invalid callback data.", show_alert=True)
 
-    _, b64_q, page_str, content_type = parts
+    _, b64_q, page_str, content_type, orig_user_id = parts
+
+    if str(cq.from_user.id) != str(orig_user_id):
+        return await cq.answer("😬 Touching random buttons, huh? You must be fun at elevators.", show_alert=True)
+
+    # ✅ DO NOT use cq.answer() again, unless necessary
     query = decode_query(b64_q)
     if not query:
         return await cq.message.edit("❌ Failed to decode query.")
@@ -419,9 +426,43 @@ async def callback_handler(client: Client, cq: CallbackQuery):
 
     total = data.get("total_pages", 1)
     text = format_results(items)
-    kb = build_keyboard(query, page, total, content_type)
+    kb = build_keyboard(query, page, total, content_type, tag="s", user_id=orig_user_id)
 
     await cq.message.edit(text, reply_markup=kb)
+
+
+
+# --- /s command handler ---
+@bot.on_message((filters.private | filters.group) & filters.command("s"))
+async def search_handler(client: Client, message: Message):
+    if len(message.command) < 2:
+        return await message.reply("❌ Please provide a search query.\n\nUsage: <code>/s naruto</code>")
+
+    query = " ".join(message.command[1:])
+    sent = await message.reply("🔍 Searching…")
+
+    try:
+        async with httpx.AsyncClient() as http_client:
+            resp = await http_client.get(f"{SEARCH_API_BASE}/search/", params={"q": query, "page": 1})
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return await sent.edit(f"❌ API error: {e}")
+
+    items = data.get("items", [])
+    if not items:
+        return await sent.edit("⚠️ No results found.")
+
+    total = data.get("total_pages", 1)
+    text = format_results(items)
+    kb = build_keyboard(query, 1, total, content_type="", tag="s", user_id=message.from_user.id)
+
+
+
+    await sent.edit(text, reply_markup=kb)
+
+# --- Callback query handler ---
+
 
 API_ENDPOINTS = {
     "latest": "/latest/",
@@ -496,7 +537,7 @@ async def endpoint_command_handler(client: Client, message: Message):
     text = format_endpoint_results(items)
 
     # 👇 Pass a unique tag to avoid collision with /search
-    kb = build_keyboard(query, 1, total_pages, tag="ep")  # ep = endpoint
+    kb = build_keyboard(query, 1, total_pages, tag="ep", content_type="", user_id=message.from_user.id)  # ep = endpoint
 
     await sent.edit(text, reply_markup=kb)
 
@@ -525,7 +566,8 @@ async def genre_lookup_handler(client: Client, message: Message):
 
     total = data.get("total_pages", 1)
     text = format_results(items)
-    kb = build_keyboard(genre_name, 1, total)
+    kb = build_keyboard(genre_name, 1, total, content_type="", tag="s", user_id=message.from_user.id)
+
 
     await sent.edit(text, reply_markup=kb)
     
@@ -557,7 +599,7 @@ async def letters_lookup_handler(client: Client, message: Message):
 
     total = data.get("total_pages", 1)
     text = format_results(items)
-    kb = build_keyboard(letter, 1, total, tag="e")  # 'e' for letter endpoint
+    kb = build_keyboard(letter, 1, total, tag="e", content_type="", user_id=message.from_user.id)  # 'e' for letter endpoint
 
     await sent.edit(text, reply_markup=kb)
 
